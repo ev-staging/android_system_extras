@@ -32,7 +32,6 @@ cc_library {
     cflags: [
         "-Werror",
         "-fno-strict-aliasing",
-        "-D_FILE_OFFSET_BITS=64",
     ],
     export_include_dirs: ["include"],
     shared_libs: [

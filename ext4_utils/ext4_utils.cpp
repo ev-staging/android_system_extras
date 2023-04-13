@@ -83,9 +83,12 @@ int ext4_bg_has_super_block(int bg) {
 
 /* Function to read the primary superblock */
 void read_sb(int fd, struct ext4_super_block* sb) {
-    if (lseek(fd, 1024, SEEK_SET) < 0) critical_error_errno("failed to seek to superblock");
+    off64_t ret;
 
-    ssize_t ret = read(fd, sb, sizeof(*sb));
+    ret = lseek64(fd, 1024, SEEK_SET);
+    if (ret < 0) critical_error_errno("failed to seek to superblock");
+
+    ret = read(fd, sb, sizeof(*sb));
     if (ret < 0) critical_error_errno("failed to read superblock");
     if (ret != sizeof(*sb)) critical_error("failed to read all of superblock");
 }
@@ -274,17 +277,17 @@ static void read_block_group_descriptors(int fd) {
 }
 
 int read_ext(int fd, int verbose) {
-    off_t ret;
+    off64_t ret;
     struct ext4_super_block sb;
 
     read_sb(fd, &sb);
 
     ext4_parse_sb_info(&sb);
 
-    ret = lseek(fd, info.len, SEEK_SET);
+    ret = lseek64(fd, info.len, SEEK_SET);
     if (ret < 0) critical_error_errno("failed to seek to end of input image");
 
-    ret = lseek(fd, info.block_size * (aux_info.first_data_block + 1), SEEK_SET);
+    ret = lseek64(fd, info.block_size * (aux_info.first_data_block + 1), SEEK_SET);
     if (ret < 0) critical_error_errno("failed to seek to block group descriptors");
 
     read_block_group_descriptors(fd);

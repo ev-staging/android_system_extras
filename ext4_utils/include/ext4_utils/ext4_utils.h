@@ -21,6 +21,11 @@
 extern "C" {
 #endif
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#define _FILE_OFFSET_BITS 64
+#define _LARGEFILE64_SOURCE 1
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -32,6 +37,13 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+
+#if defined(__APPLE__) && defined(__MACH__)
+#define lseek64 lseek
+#define ftruncate64 ftruncate
+#define mmap64 mmap
+#define off64_t off_t
+#endif
 
 #include "ext4_sb.h"
 
