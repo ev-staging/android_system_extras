@@ -349,6 +349,7 @@ cc_library {
     defaults: ["simpleperf_shared_libs"],
     srcs: ["profcollect.cpp"],
     host_supported: false,
+    ldflags: ["-Wl,--exclude-libs=ALL"],
     static_libs: ["libsimpleperf"],
     shared_libs: [
         "libLLVM_android",
@@ -508,6 +509,7 @@ cc_library {
             static_libs: ["libdexfile_static"],
         },
     },
+    sdclang: false,
 }
 
 // It's the shared library used on host by python scripts to report samples in different ways.
