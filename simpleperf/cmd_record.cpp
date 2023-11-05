@@ -202,7 +202,7 @@ class RecordCommand : public Command {
 "             samples every second. For non-tracepoint events, the default\n"
 "             option is -f 4000. A -f/-c option affects all event types\n"
 "             following it until meeting another -f/-c option. For example,\n"
-"             for \"-f 1000 cpu-cycles -c 1 -e sched:sched_switch\", cpu-cycles\n"
+"             for \"-f 1000 -e cpu-cycles -c 1 -e sched:sched_switch\", cpu-cycles\n"
 "             has sample freq 1000, sched:sched_switch event has sample period 1.\n"
 "-c count     Set event sample period. It means recording one sample when\n"
 "             [count] events happen. For tracepoint events, the default option\n"
@@ -216,9 +216,9 @@ class RecordCommand : public Command {
 "                        Possible values are: realtime, monotonic,\n"
 "                        monotonic_raw, boottime, perf. If supported, default\n"
 "                        is monotonic, otherwise is perf.\n"
-"--cpu cpu_item1,cpu_item2,...\n"
-"             Collect samples only on the selected cpus. cpu_item can be cpu\n"
-"             number like 1, or cpu range like 0-3.\n"
+"--cpu cpu_item1,cpu_item2,...  Monitor events on selected cpus. cpu_item can be a number like\n"
+"                               1, or a range like 0-3. A --cpu option affects all event types\n"
+"                               following it until meeting another --cpu option.\n"
 "--duration time_in_sec  Monitor for time_in_sec seconds instead of running\n"
 "                        [command]. Here time_in_sec may be any positive\n"
 "                        floating point number.\n"
@@ -413,7 +413,6 @@ RECORD_FILTER_OPTION_HELP_MSG_FOR_RECORDING
   void CollectHitFileInfo(const SampleRecord& r, std::unordered_set<Dso*>* dso_set);
   bool DumpETMBranchListFeature();
 
-  std::unique_ptr<SampleSpeed> sample_speed_;
   bool system_wide_collection_;
   uint64_t branch_sampling_;
   bool fp_callchain_sampling_;
@@ -429,7 +428,6 @@ RECORD_FILTER_OPTION_HELP_MSG_FOR_RECORDING
   bool can_dump_kernel_symbols_;
   bool dump_symbols_;
   std::string clockid_;
-  std::vector<int> cpus_;
   EventSelectionSet event_selection_set_;
 
   std::pair<size_t, size_t> mmap_page_range_;
@@ -584,12 +582,8 @@ bool RecordCommand::PrepareRecording(Workload* workload) {
         LOG(INFO) << "Hardware events are not available, switch to cpu-clock.";
       }
     }
-    size_t group_id;
-    if (!event_selection_set_.AddEventType(event_type, &group_id)) {
+    if (!event_selection_set_.AddEventType(event_type)) {
       return false;
-    }
-    if (sample_speed_) {
-      event_selection_set_.SetSampleSpeed(group_id, *sample_speed_);
     }
   }
 
@@ -657,7 +651,7 @@ bool RecordCommand::PrepareRecording(Workload* workload) {
   }
 
   // 5. Open perf event files and create mapped buffers.
-  if (!event_selection_set_.OpenEventFiles(cpus_)) {
+  if (!event_selection_set_.OpenEventFiles()) {
     return false;
   }
   size_t record_buffer_size = 0;
@@ -1024,14 +1018,6 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
     }
   }
 
-  if (auto value = options.PullValue("--cpu"); value) {
-    if (auto cpus = GetCpusFromString(*value->str_value); cpus) {
-      cpus_.assign(cpus->begin(), cpus->end());
-    } else {
-      return false;
-    }
-  }
-
   if (!options.PullUintValue("--cpu-percent", &cpu_time_max_percent_, 1, 100)) {
     return false;
   }
@@ -1179,8 +1165,6 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
   CHECK(options.values.empty());
 
   // Process ordered options.
-  std::vector<size_t> wait_setting_speed_event_groups;
-
   for (const auto& pair : ordered_options) {
     const OptionName& name = pair.first;
     const OptionValue& value = pair.second;
@@ -1190,20 +1174,17 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
         LOG(ERROR) << "invalid " << name << ": " << value.uint_value;
         return false;
       }
+      SampleRate rate;
       if (name == "-c") {
-        sample_speed_.reset(new SampleSpeed(0, value.uint_value));
+        rate.sample_period = value.uint_value;
       } else {
         if (value.uint_value >= INT_MAX) {
           LOG(ERROR) << "sample freq can't be bigger than INT_MAX: " << value.uint_value;
           return false;
         }
-        sample_speed_.reset(new SampleSpeed(value.uint_value, 0));
+        rate.sample_freq = value.uint_value;
       }
-
-      for (auto groud_id : wait_setting_speed_event_groups) {
-        event_selection_set_.SetSampleSpeed(groud_id, *sample_speed_);
-      }
-      wait_setting_speed_event_groups.clear();
+      event_selection_set_.SetSampleRateForNewEvents(rate);
 
     } else if (name == "--call-graph") {
       std::vector<std::string> strs = android::base::Split(*value.str_value, ",");
@@ -1232,6 +1213,13 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
         }
       }
 
+    } else if (name == "--cpu") {
+      if (auto cpus = GetCpusFromString(*value.str_value); cpus) {
+        event_selection_set_.SetCpusForNewEvents(
+            std::vector<int>(cpus.value().begin(), cpus.value().end()));
+      } else {
+        return false;
+      }
     } else if (name == "-e") {
       std::vector<std::string> event_types = android::base::Split(*value.str_value, ",");
       for (auto& event_type : event_types) {
@@ -1240,17 +1228,10 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
             return false;
           }
         }
-        size_t group_id;
-        if (!event_selection_set_.AddEventType(event_type, &group_id)) {
+        if (!event_selection_set_.AddEventType(event_type)) {
           return false;
         }
-        if (sample_speed_) {
-          event_selection_set_.SetSampleSpeed(group_id, *sample_speed_);
-        } else {
-          wait_setting_speed_event_groups.push_back(group_id);
-        }
       }
-
     } else if (name == "-g") {
       fp_callchain_sampling_ = false;
       dwarf_callchain_sampling_ = true;
@@ -1263,16 +1244,9 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
           }
         }
       }
-      size_t group_id;
-      if (!event_selection_set_.AddEventGroup(event_types, &group_id)) {
+      if (!event_selection_set_.AddEventGroup(event_types)) {
         return false;
       }
-      if (sample_speed_) {
-        event_selection_set_.SetSampleSpeed(group_id, *sample_speed_);
-      } else {
-        wait_setting_speed_event_groups.push_back(group_id);
-      }
-
     } else if (name == "--tp-filter") {
       if (!event_selection_set_.SetTracepointFilter(*value.str_value)) {
         return false;
@@ -1380,7 +1354,7 @@ bool RecordCommand::TraceOffCpu() {
                << android::base::Join(accepted_events, ' ');
     return false;
   }
-  if (!event_selection_set_.AddEventType("sched:sched_switch")) {
+  if (!event_selection_set_.AddEventType("sched:sched_switch", SampleRate(0, 1))) {
     return false;
   }
   if (IsSwitchRecordSupported()) {
