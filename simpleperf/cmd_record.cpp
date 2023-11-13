@@ -313,6 +313,8 @@ RECORD_FILTER_OPTION_HELP_MSG_FOR_RECORDING
 "--decode-etm                     Convert ETM data into branch lists while recording.\n"
 "--binary binary_name             Used with --decode-etm to only generate data for binaries\n"
 "                                 matching binary_name regex.\n"
+"--record-timestamp               Generate timestamp packets in ETM stream.\n"
+"--record-cycles                  Generate cycle count packets in ETM stream.\n"
 "\n"
 "Other options:\n"
 "--exit-with-parent            Stop recording when the thread starting simpleperf dies.\n"
@@ -393,7 +395,7 @@ RECORD_FILTER_OPTION_HELP_MSG_FOR_RECORDING
   bool SaveRecordForPostUnwinding(Record* record);
   bool SaveRecordAfterUnwinding(Record* record);
   bool SaveRecordWithoutUnwinding(Record* record);
-  bool ProcessJITDebugInfo(const std::vector<JITDebugInfo>& debug_info, bool sync_kernel_records);
+  bool ProcessJITDebugInfo(std::vector<JITDebugInfo> debug_info, bool sync_kernel_records);
   bool ProcessControlCmd(IOEventLoop* loop);
   void UpdateRecord(Record* record);
   bool UnwindRecord(SampleRecord& r);
@@ -714,8 +716,8 @@ bool RecordCommand::PrepareRecording(Workload* workload) {
     }
   }
   if (jit_debug_reader_) {
-    auto callback = [this](const std::vector<JITDebugInfo>& debug_info, bool sync_kernel_records) {
-      return ProcessJITDebugInfo(debug_info, sync_kernel_records);
+    auto callback = [this](std::vector<JITDebugInfo> debug_info, bool sync_kernel_records) {
+      return ProcessJITDebugInfo(std::move(debug_info), sync_kernel_records);
     };
     if (!jit_debug_reader_->RegisterDebugInfoCallback(loop, callback)) {
       return false;
@@ -1024,6 +1026,16 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
 
   if (options.PullBoolValue("--decode-etm")) {
     etm_branch_list_generator_ = ETMBranchListGenerator::Create(system_wide_collection_);
+  }
+
+  if (options.PullBoolValue("--record-timestamp")) {
+    ETMRecorder& recorder = ETMRecorder::GetInstance();
+    recorder.SetRecordTimestamp(true);
+  }
+
+  if (options.PullBoolValue("--record-cycles")) {
+    ETMRecorder& recorder = ETMRecorder::GetInstance();
+    recorder.SetRecordCycles(true);
   }
 
   if (!options.PullDoubleValue("--duration", &duration_in_sec_, 1e-9)) {
@@ -1624,7 +1636,7 @@ bool RecordCommand::SaveRecordWithoutUnwinding(Record* record) {
   return record_file_writer_->WriteRecord(*record);
 }
 
-bool RecordCommand::ProcessJITDebugInfo(const std::vector<JITDebugInfo>& debug_info,
+bool RecordCommand::ProcessJITDebugInfo(std::vector<JITDebugInfo> debug_info,
                                         bool sync_kernel_records) {
   for (auto& info : debug_info) {
     if (info.type == JITDebugInfo::JIT_DEBUG_JIT_CODE) {
@@ -1637,8 +1649,12 @@ bool RecordCommand::ProcessJITDebugInfo(const std::vector<JITDebugInfo>& debug_i
         return false;
       }
     } else {
-      if (info.extracted_dex_file_map) {
-        ThreadMmap& map = *info.extracted_dex_file_map;
+      if (!info.symbols.empty()) {
+        Dso* dso = thread_tree_.FindUserDsoOrNew(info.file_path, 0, DSO_DEX_FILE);
+        dso->SetSymbols(&info.symbols);
+      }
+      if (info.dex_file_map) {
+        ThreadMmap& map = *info.dex_file_map;
         uint64_t timestamp =
             jit_debug_reader_->SyncWithRecords() ? info.timestamp : last_record_timestamp_;
         Mmap2Record record(dumping_attr_id_.attr, false, info.pid, info.pid, map.start_addr,
