@@ -210,6 +210,18 @@ cc_defaults {
     use_version_lib: true,
 }
 
+python_binary_host {
+    name: "event_table_generator",
+    srcs: ["event_table_generator.py"],
+}
+
+genrule {
+    name: "simpleperf_event_table",
+    out: ["event_table.cpp"],
+    tools: ["event_table_generator"],
+    cmd: "$(location event_table_generator) $(out)",
+}
+
 cc_defaults {
     name: "simpleperf_libs_for_tests",
     defaults: ["simpleperf_shared_libs"],
@@ -241,8 +253,8 @@ cc_defaults {
         "cmd_report_sample.proto",
         "command.cpp",
         "dso.cpp",
-        "etm_branch_list.proto",
-        "ETMBranchListFile.cpp",
+        "branch_list.proto",
+        "BranchListFile.cpp",
         "event_attr.cpp",
         "event_type.cpp",
         "kallsyms.cpp",
@@ -259,6 +271,7 @@ cc_defaults {
         "thread_tree.cpp",
         "tracing.cpp",
         "utils.cpp",
+        ":simpleperf_event_table",
     ],
     target: {
         android: {
@@ -586,6 +599,7 @@ cc_defaults {
         "cmd_report_test.cpp",
     ],
     srcs: [
+        "BranchListFile_test.cpp",
         "cmd_inject_test.cpp",
         "cmd_kmem_test.cpp",
         "cmd_merge_test.cpp",

@@ -33,7 +33,6 @@
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
-#include <android-base/scopeguard.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
 #include <android-base/unique_fd.h>
@@ -48,8 +47,8 @@
 #endif
 #include <unwindstack/Error.h>
 
+#include "BranchListFile.h"
 #include "CallChainJoiner.h"
-#include "ETMBranchListFile.h"
 #include "ETMRecorder.h"
 #include "IOEventLoop.h"
 #include "JITDebugReader.h"
@@ -190,8 +189,8 @@ class RecordCommand : public Command {
 "--kprobe kprobe_event1,kprobe_event2,...\n"
 "             Add kprobe events during recording. The kprobe_event format is in\n"
 "             Documentation/trace/kprobetrace.rst in the kernel. Examples:\n"
-"               'p:myprobe do_sys_open $arg2:string'   - add event kprobes:myprobe\n"
-"               'r:myretprobe do_sys_open $retval:s64' - add event kprobes:myretprobe\n"
+"               'p:myprobe do_sys_openat2 $arg2:string'   - add event kprobes:myprobe\n"
+"               'r:myretprobe do_sys_openat2 $retval:s64' - add event kprobes:myretprobe\n"
 "--add-counter event1,event2,...     Add additional event counts in record samples. For example,\n"
 "                                    we can use `-e cpu-cycles --add-counter instructions` to\n"
 "                                    get samples for cpu-cycles event, while having instructions\n"
@@ -219,6 +218,7 @@ class RecordCommand : public Command {
 "--cpu cpu_item1,cpu_item2,...  Monitor events on selected cpus. cpu_item can be a number like\n"
 "                               1, or a range like 0-3. A --cpu option affects all event types\n"
 "                               following it until meeting another --cpu option.\n"
+"--delay    time_in_ms   Wait time_in_ms milliseconds before recording samples.\n"
 "--duration time_in_sec  Monitor for time_in_sec seconds instead of running\n"
 "                        [command]. Here time_in_sec may be any positive\n"
 "                        floating point number.\n"
@@ -372,7 +372,7 @@ RECORD_FILTER_OPTION_HELP_MSG_FOR_RECORDING
 
  private:
   bool ParseOptions(const std::vector<std::string>& args, std::vector<std::string>* non_option_args,
-                    ProbeEvents* probe_events);
+                    ProbeEvents& probe_events);
   bool AdjustPerfEventLimit();
   bool PrepareRecording(Workload* workload);
   bool DoRecording(Workload* workload);
@@ -426,6 +426,7 @@ RECORD_FILTER_OPTION_HELP_MSG_FOR_RECORDING
   bool keep_failed_unwinding_debug_info_ = false;
   std::unique_ptr<OfflineUnwinder> offline_unwinder_;
   bool child_inherit_;
+  uint64_t delay_in_ms_ = 0;
   double duration_in_sec_;
   bool can_dump_kernel_symbols_;
   bool dump_symbols_;
@@ -512,15 +513,8 @@ void RecordCommand::Run(const std::vector<std::string>& args, int* exit_code) {
   AllowMoreOpenedFiles();
 
   std::vector<std::string> workload_args;
-  ProbeEvents probe_events;
-  auto clear_probe_events_guard = android::base::make_scope_guard([this, &probe_events] {
-    if (!probe_events.IsEmpty()) {
-      // probe events can be deleted only when no perf event file is using them.
-      event_selection_set_.CloseEventFiles();
-      probe_events.Clear();
-    }
-  });
-  if (!ParseOptions(args, &workload_args, &probe_events)) {
+  ProbeEvents probe_events(event_selection_set_);
+  if (!ParseOptions(args, &workload_args, probe_events)) {
     return;
   }
   if (!AdjustPerfEventLimit()) {
@@ -622,7 +616,7 @@ bool RecordCommand::PrepareRecording(Workload* workload) {
   } else if (!event_selection_set_.HasMonitoredTarget()) {
     if (workload != nullptr) {
       event_selection_set_.AddMonitoredProcesses({workload->GetPid()});
-      event_selection_set_.SetEnableOnExec(true);
+      event_selection_set_.SetEnableCondition(false, true);
     } else if (!app_package_name_.empty()) {
       // If app process is not created, wait for it. This allows simpleperf starts before
       // app process. In this way, we can have a better support of app start-up time profiling.
@@ -636,6 +630,10 @@ bool RecordCommand::PrepareRecording(Workload* workload) {
   } else {
     need_to_check_targets = true;
   }
+  if (delay_in_ms_ != 0) {
+    event_selection_set_.SetEnableCondition(false, false);
+  }
+
   // Profiling JITed/interpreted Java code is supported starting from Android P.
   // Also support profiling art interpreter on host.
   if (GetAndroidVersion() >= kAndroidVersionP || GetAndroidVersion() == 0) {
@@ -703,6 +701,21 @@ bool RecordCommand::PrepareRecording(Workload* workload) {
     }
   }
 
+  if (delay_in_ms_ != 0) {
+    auto delay_callback = [this]() {
+      if (!event_selection_set_.SetEnableEvents(true)) {
+        return false;
+      }
+      if (!system_wide_collection_) {
+        // Dump maps in case there are new maps created while delaying.
+        return DumpMaps();
+      }
+      return true;
+    };
+    if (!loop->AddOneTimeEvent(SecondToTimeval(delay_in_ms_ / 1000), delay_callback)) {
+      return false;
+    }
+  }
   if (duration_in_sec_ != 0) {
     if (!loop->AddPeriodicEvent(
             SecondToTimeval(duration_in_sec_), [loop]() { return loop->ExitLoop(); },
@@ -943,7 +956,7 @@ bool RecordCommand::PostProcessRecording(const std::vector<std::string>& args) {
 
 bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
                                  std::vector<std::string>* non_option_args,
-                                 ProbeEvents* probe_events) {
+                                 ProbeEvents& probe_events) {
   OptionValueMap options;
   std::vector<std::pair<OptionName, OptionValue>> ordered_options;
 
@@ -1038,6 +1051,10 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
     recorder.SetRecordCycles(true);
   }
 
+  if (!options.PullUintValue("--delay", &delay_in_ms_)) {
+    return false;
+  }
+
   if (!options.PullDoubleValue("--duration", &duration_in_sec_, 1e-9)) {
     return false;
   }
@@ -1073,7 +1090,7 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
   for (const OptionValue& value : options.PullValues("--kprobe")) {
     std::vector<std::string> cmds = android::base::Split(*value.str_value, ",");
     for (const auto& cmd : cmds) {
-      if (!probe_events->AddKprobe(cmd)) {
+      if (!probe_events.AddKprobe(cmd)) {
         return false;
       }
     }
@@ -1235,10 +1252,8 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
     } else if (name == "-e") {
       std::vector<std::string> event_types = android::base::Split(*value.str_value, ",");
       for (auto& event_type : event_types) {
-        if (probe_events->IsProbeEvent(event_type)) {
-          if (!probe_events->CreateProbeEventIfNotExist(event_type)) {
-            return false;
-          }
+        if (!probe_events.CreateProbeEventIfNotExist(event_type)) {
+          return false;
         }
         if (!event_selection_set_.AddEventType(event_type)) {
           return false;
@@ -1250,10 +1265,8 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
     } else if (name == "--group") {
       std::vector<std::string> event_types = android::base::Split(*value.str_value, ",");
       for (const auto& event_type : event_types) {
-        if (probe_events->IsProbeEvent(event_type)) {
-          if (!probe_events->CreateProbeEventIfNotExist(event_type)) {
-            return false;
-          }
+        if (!probe_events.CreateProbeEventIfNotExist(event_type)) {
+          return false;
         }
       }
       if (!event_selection_set_.AddEventGroup(event_types)) {
@@ -1264,7 +1277,8 @@ bool RecordCommand::ParseOptions(const std::vector<std::string>& args,
         return false;
       }
     } else {
-      CHECK(false) << "unprocessed option: " << name;
+      LOG(ERROR) << "unprocessed option: " << name;
+      return false;
     }
   }
 
@@ -1524,7 +1538,7 @@ bool RecordCommand::ProcessRecord(Record* record) {
   // Record filter check should go after DumpMapsForRecord(). Otherwise, process/thread name
   // filters don't work in system wide collection.
   if (record->type() == PERF_RECORD_SAMPLE) {
-    if (!record_filter_.Check(static_cast<SampleRecord*>(record))) {
+    if (!record_filter_.Check(static_cast<SampleRecord&>(*record))) {
       return true;
     }
   }
@@ -2181,6 +2195,13 @@ void RecordCommand::CollectHitFileInfo(const SampleRecord& r, std::unordered_set
   const ThreadEntry* thread = thread_tree_.FindThreadOrNew(r.tid_data.pid, r.tid_data.tid);
   size_t kernel_ip_count;
   std::vector<uint64_t> ips = r.GetCallChain(&kernel_ip_count);
+  if ((r.sample_type & PERF_SAMPLE_BRANCH_STACK) != 0) {
+    for (uint64_t i = 0; i < r.branch_stack_data.stack_nr; ++i) {
+      const auto& item = r.branch_stack_data.stack[i];
+      ips.push_back(item.from);
+      ips.push_back(item.to);
+    }
+  }
   for (size_t i = 0; i < ips.size(); i++) {
     const MapEntry* map = thread_tree_.FindMap(thread, ips[i], i < kernel_ip_count);
     Dso* dso = map->dso;
@@ -2200,9 +2221,9 @@ void RecordCommand::CollectHitFileInfo(const SampleRecord& r, std::unordered_set
 }
 
 bool RecordCommand::DumpETMBranchListFeature() {
-  BranchListBinaryMap binary_map = etm_branch_list_generator_->GetBranchListBinaryMap();
+  ETMBinaryMap binary_map = etm_branch_list_generator_->GetETMBinaryMap();
   std::string s;
-  if (!BranchListBinaryMapToString(binary_map, s)) {
+  if (!ETMBinaryMapToString(binary_map, s)) {
     return false;
   }
   return record_file_writer_->WriteFeature(PerfFileFormat::FEAT_ETM_BRANCH_LIST, s.data(),
