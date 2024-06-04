@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs::{read_dir, remove_file};
 use std::path::Path;
+use std::process::Command;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -61,6 +62,8 @@ pub struct Config {
     pub binary_filter: String,
     /// Maximum size of the trace directory.
     pub max_trace_limit: u64,
+    /// The kernel release version
+    pub kernel_release: String,
 }
 
 impl Config {
@@ -78,13 +81,14 @@ impl Config {
                 "max_trace_limit",
                 /* 512MB */ 512 * 1024 * 1024,
             )?,
+            kernel_release: get_kernel_release(),
         })
     }
 }
 
-impl ToString for Config {
-    fn to_string(&self) -> String {
-        serde_json::to_string(self).expect("Failed to deserialise configuration.")
+impl std::fmt::Display for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string(self).expect("Failed to deserialise configuration."))
     }
 }
 
@@ -151,6 +155,15 @@ fn generate_random_node_id() -> MacAddr6 {
     MacAddr6::from(node_id)
 }
 
+fn get_kernel_release() -> String {
+    match Command::new("uname").args(["-r"]).output() {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 pub fn clear_data() -> Result<()> {
     fn remove_files(path: &Path) -> Result<()> {
         read_dir(path)?
@@ -164,5 +177,13 @@ pub fn clear_data() -> Result<()> {
     remove_files(&TRACE_OUTPUT_DIR)?;
     remove_files(&PROFILE_OUTPUT_DIR)?;
     remove_files(&REPORT_OUTPUT_DIR)?;
+    Ok(())
+}
+pub fn clear_processed_files() -> Result<()> {
+    read_dir(&PROFILE_OUTPUT_DIR as &Path)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|e| e.is_file() && e != (&CONFIG_FILE as &Path))
+        .try_for_each(remove_file)?;
     Ok(())
 }
