@@ -33,18 +33,21 @@ license {
 }
 
 cc_defaults {
-    name: "libsimpleperf_elf_read_static_reqs_defaults",
+    name: "libsimpleperf_readelf_defaults",
     static_libs: [
-        "libLLVMObject",
-        "libLLVMBitReader",
-        "libLLVMMC",
-        "libLLVMMCParser",
-        "libLLVMCore",
-        "libLLVMSupport",
-        "liblzma",
-        "libz",
-        "libziparchive",
+        "libsimpleperf_readelf",
     ],
+    target: {
+        linux: {
+            ldflags: ["-Wl,--exclude-libs=libsimpleperf_readelf.a"],
+        },
+        windows: {
+            host_ldlibs: [
+                "-lole32",
+                "-luuid",
+            ],
+        },
+    },
 }
 
 cc_defaults {
@@ -55,6 +58,7 @@ cc_defaults {
                 "-DUSE_BIONIC_UAPI_HEADERS",
                 "-fvisibility=hidden",
             ],
+            compile_multilib: "64",
             include_dirs: ["bionic/libc/kernel"],
         },
         darwin: {
@@ -66,11 +70,6 @@ cc_defaults {
             local_include_dirs: ["nonlinux_support/include"],
         },
     },
-    arch: {
-        riscv64: {
-            enabled: false,
-        },
-    },
 }
 
 // linked as a separate library because using OpenCSD headers needs to enable exception
@@ -78,7 +77,7 @@ cc_library_static {
     name: "libsimpleperf_etm_decoder",
     defaults: [
         "simpleperf_cflags",
-        "libsimpleperf_elf_read_static_reqs_defaults",
+        "libsimpleperf_readelf_defaults",
     ],
     host_supported: true,
     srcs: ["ETMDecoder.cpp"],
@@ -121,7 +120,7 @@ cc_library_static {
 cc_defaults {
     name: "simpleperf_static_libs",
     defaults: [
-        "libsimpleperf_elf_read_static_reqs_defaults",
+        "libsimpleperf_readelf_defaults",
         "simpleperf_cflags",
     ],
     host_supported: true,
@@ -130,9 +129,12 @@ cc_defaults {
         "libsimpleperf_regex",
         "libbase",
         "liblog",
+        "liblzma",
         "libutils",
         "libprotobuf-cpp-lite",
         "libopencsd_decoder",
+        "libz",
+        "libziparchive",
     ],
     target: {
         linux: {
@@ -163,12 +165,15 @@ cc_defaults {
     name: "simpleperf_shared_libs",
     defaults: [
         "simpleperf_cflags",
+	"libsimpleperf_readelf_defaults",
     ],
     host_supported: true,
     shared_libs: [
         "libbase",
+        "liblog",
         "liblzma",
         "libprotobuf-cpp-lite",
+        "libz",
         "libziparchive",
     ],
     static_libs: [
@@ -194,16 +199,6 @@ cc_defaults {
                 "libdexfile", // libdexfile_support dependency
             ],
         },
-        host: {
-            static_libs: [
-                "libLLVMObject",
-                "libLLVMBitReader",
-                "libLLVMMC",
-                "libLLVMMCParser",
-                "libLLVMCore",
-                "libLLVMSupport",
-            ],
-        },
         windows: {
             enabled: true,
         },
@@ -222,24 +217,6 @@ genrule {
     srcs: ["event_table.json"],
     tools: ["event_table_generator"],
     cmd: "$(location event_table_generator) $(in) $(out)",
-}
-
-cc_defaults {
-    name: "simpleperf_libs_for_tests",
-    defaults: ["simpleperf_shared_libs"],
-    target: {
-        android: {
-            // 32-bit libLLVM_android isn't shipped on device. So use static llvm libs in tests.
-            static_libs: [
-                "libLLVMObject",
-                "libLLVMBitReader",
-                "libLLVMMC",
-                "libLLVMMCParser",
-                "libLLVMCore",
-                "libLLVMSupport",
-            ],
-        },
-    },
 }
 
 cc_defaults {
@@ -320,7 +297,6 @@ cc_library_static {
         "libsimpleperf_srcs",
         "simpleperf_static_libs",
     ],
-    compile_multilib: "both",
     proto: {
         type: "lite",
     },
@@ -351,9 +327,7 @@ cc_binary {
     static_libs: ["libsimpleperf"],
     target: {
         android: {
-            shared_libs: [
-                "libLLVM_android",
-            ],
+            compile_multilib: "first",
         },
     },
     init_rc: ["simpleperf.rc"],
@@ -367,7 +341,6 @@ cc_library {
     ldflags: ["-Wl,--exclude-libs=ALL"],
     static_libs: ["libsimpleperf"],
     shared_libs: [
-        "libLLVM_android",
         "libpower",
     ],
 }
@@ -666,7 +639,7 @@ cc_test {
     name: "simpleperf_unit_test",
     defaults: [
         "simpleperf_test_srcs",
-        "simpleperf_libs_for_tests",
+        "simpleperf_shared_libs",
     ],
     static_libs: [
         "libgmock",
@@ -688,7 +661,7 @@ cc_test {
 cc_test {
     name: "simpleperf_cpu_hotplug_test",
     defaults: [
-        "simpleperf_libs_for_tests",
+        "simpleperf_shared_libs",
     ],
     test_options: {
         unit_test: true,
@@ -714,7 +687,7 @@ cc_library_static {
     name: "libsimpleperf_cts_test",
     defaults: [
         "simpleperf_test_srcs",
-        "simpleperf_libs_for_tests",
+        "simpleperf_shared_libs",
     ],
     host_supported: false,
     cflags: [
@@ -733,7 +706,7 @@ cc_library_static {
 cc_test {
     name: "simpleperf_record_test",
     defaults: [
-        "simpleperf_libs_for_tests",
+        "simpleperf_shared_libs",
     ],
     srcs: [
         "record_lib_test.cpp",
@@ -778,5 +751,29 @@ cc_fuzz {
             enabled: false,
         },
     },
+    dictionary: "simpleperf_dict.dict",
     corpus: ["testdata/**/*.data"],
+}
+
+cc_fuzz {
+    name: "simpleperf_writer_fuzzer",
+    defaults: [
+        "simpleperf_static_libs",
+    ],
+    host_supported: true,
+    srcs: [
+        "simpleperf_writer_fuzzer.cpp",
+    ],
+    static_libs: [
+        "libsimpleperf",
+    ],
+    target: {
+        linux: {
+            // Fuzzer may not be able to load libdexfile. So statically link it.
+            static_libs: ["libdexfile_static"],
+        },
+        windows: {
+            enabled: false,
+        },
+    },
 }
